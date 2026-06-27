@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>振替ナビ - プロトタイプ v2</title>
+<style>
+  :root{
+    --bg:#f0f2f5; --card:#ffffff; --ink:#1a1d24; --sub:#6b7280;
+    --line:#e5e7eb; --brand:#0b6e4f; --brand2:#10b981;
+    --alert:#dc2626; --alert-bg:#fef2f2; --warn:#d97706;
+    --wait:#2563eb;
+    --shadow:0 4px 18px rgba(0,0,0,.08);
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
+  body{background:#d7dbe0;font-family:-apple-system,"Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
+       display:flex;justify-content:center;align-items:flex-start;min-height:100vh;padding:24px 12px;color:var(--ink);}
+  .phone{width:390px;max-width:100%;background:var(--bg);border-radius:38px;overflow:hidden;
+         box-shadow:0 20px 60px rgba(0,0,0,.3);border:10px solid #111;position:relative;height:820px;}
+  .notch{position:absolute;top:0;left:50%;transform:translateX(-50%);width:150px;height:26px;background:#111;
+          border-radius:0 0 18px 18px;z-index:50;}
+  .statusbar{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;
+             font-size:13px;font-weight:600;color:#fff;background:var(--brand);}
+  .screen{height:calc(820px - 44px - 64px);overflow-y:auto;-webkit-overflow-scrolling:touch;}
+  .screen::-webkit-scrollbar{display:none;}
+
+  .apphead{background:var(--brand);color:#fff;padding:6px 20px 18px;}
+  .apphead h1{font-size:21px;letter-spacing:.5px;display:flex;align-items:center;gap:8px;}
+  .apphead .badge{font-size:10px;background:rgba(255,255,255,.22);padding:2px 8px;border-radius:99px;font-weight:600;}
+  .apphead p{font-size:12px;opacity:.85;margin-top:3px;}
+
+  .wrap{padding:16px 16px 28px;}
+  .card{background:var(--card);border-radius:18px;padding:16px;box-shadow:var(--shadow);margin-bottom:14px;}
+  .label{font-size:11px;color:var(--sub);font-weight:700;letter-spacing:.6px;margin-bottom:8px;text-transform:uppercase;}
+
+  .loc{display:flex;align-items:center;gap:12px;}
+  .loc .pin{width:42px;height:42px;border-radius:50%;background:#e7f5ef;display:flex;align-items:center;justify-content:center;font-size:20px;}
+  .loc .now{font-size:18px;font-weight:700;}
+  .loc .sub{font-size:12px;color:var(--sub);}
+  .loc select{margin-left:auto;border:1px solid var(--line);border-radius:10px;padding:8px 6px;font-size:13px;background:#fff;}
+
+  .alert{background:var(--alert-bg);border:1px solid #fecaca;border-radius:16px;padding:14px 16px;margin-bottom:14px;
+         display:flex;gap:12px;align-items:flex-start;}
+  .alert .ic{font-size:22px;}
+  .alert h2{font-size:15px;color:var(--alert);}
+  .alert p{font-size:12.5px;color:#7f1d1d;margin-top:3px;line-height:1.5;}
+  .source{font-size:10.5px;color:var(--sub);margin-top:8px;display:flex;align-items:center;gap:5px;line-height:1.4;}
+  .source .live{width:7px;height:7px;border-radius:50%;background:#22c55e;flex-shrink:0;box-shadow:0 0 0 3px rgba(34,197,94,.2);}
+
+  /* ===== 判断カード（主役）===== */
+  .verdict{border-radius:20px;padding:18px 16px;margin-bottom:14px;color:#fff;box-shadow:var(--shadow);}
+  .verdict.go{background:linear-gradient(135deg,#0b6e4f,#10b981);}
+  .verdict.wait{background:linear-gradient(135deg,#1e40af,#3b82f6);}
+  .verdict.close{background:linear-gradient(135deg,#b45309,#f59e0b);}
+  .verdict .vlabel{font-size:11px;font-weight:700;letter-spacing:1px;opacity:.9;}
+  .verdict .vmain{font-size:23px;font-weight:800;margin:6px 0 4px;line-height:1.25;}
+  .verdict .vsub{font-size:12.5px;opacity:.95;line-height:1.5;}
+  .vcompare{display:flex;gap:10px;margin-top:14px;}
+  .vcell{flex:1;background:rgba(255,255,255,.16);border-radius:13px;padding:11px 12px;}
+  .vcell.dim{opacity:.62;}
+  .vcell .ct{font-size:11px;opacity:.9;display:flex;align-items:center;gap:5px;}
+  .vcell .cv{font-size:22px;font-weight:800;margin-top:3px;line-height:1;}
+  .vcell .cv span{font-size:12px;font-weight:600;}
+  .vcell .cd{font-size:10.5px;opacity:.85;margin-top:4px;}
+
+  .seg{display:flex;gap:6px;background:#e9ecf1;border-radius:12px;padding:4px;margin-bottom:14px;}
+  .seg button{flex:1;border:none;background:none;padding:9px 0;font-size:12.5px;font-weight:700;color:var(--sub);border-radius:9px;cursor:pointer;}
+  .seg button.on{background:#fff;color:var(--brand);box-shadow:0 1px 4px rgba(0,0,0,.1);}
+
+  .seclabel{font-size:12px;font-weight:800;color:var(--sub);margin:2px 2px 10px;}
+
+  .opt{background:var(--card);border-radius:18px;box-shadow:var(--shadow);margin-bottom:12px;overflow:hidden;border:1px solid var(--line);}
+  .opt .top{display:flex;align-items:center;gap:10px;padding:14px 16px 10px;}
+  .opt .mode{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;font-size:19px;color:#fff;flex-shrink:0;}
+  .opt .ti{font-size:15px;font-weight:700;}
+  .opt .meta{font-size:11.5px;color:var(--sub);margin-top:2px;}
+  .opt .right{margin-left:auto;text-align:right;}
+  .opt .min{font-size:20px;font-weight:800;line-height:1;}
+  .opt .min span{font-size:11px;font-weight:600;color:var(--sub);}
+  .opt .cost{font-size:12px;color:var(--ink);margin-top:3px;font-weight:600;}
+  .opt .cost.free{color:var(--brand);}
+  .steps{padding:4px 16px 14px;border-top:1px dashed var(--line);margin-top:4px;}
+  .step{display:flex;gap:10px;font-size:12.5px;padding:5px 0;align-items:center;}
+  .step .ln{font-weight:700;padding:1px 7px;border-radius:6px;color:#fff;font-size:11px;}
+  .badges{display:flex;gap:6px;padding:0 16px 14px;flex-wrap:wrap;}
+  .tag{font-size:10.5px;font-weight:700;padding:3px 9px;border-radius:99px;}
+  .tag.free{background:#e7f5ef;color:var(--brand);}
+  .tag.official{background:#eef2ff;color:#4338ca;}
+  .tag.reco{background:var(--brand);color:#fff;}
+  .gobtn{display:block;width:100%;background:var(--brand);color:#fff;border:none;padding:13px;border-radius:13px;font-size:14px;font-weight:700;cursor:pointer;margin-top:2px;}
+
+  .tabbar{position:absolute;bottom:0;left:0;right:0;height:64px;background:#fff;border-top:1px solid var(--line);
+          display:flex;align-items:center;justify-content:space-around;padding-bottom:6px;z-index:40;}
+  .tabbar .t{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px;color:var(--sub);cursor:pointer;}
+  .tabbar .t.on{color:var(--brand);font-weight:700;}
+  .tabbar .t .ico{font-size:20px;}
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="notch"></div>
+  <div class="statusbar"><span id="clock">7:42</span><span>📶 🔋 100%</span></div>
+
+  <div class="screen">
+    <div class="apphead">
+      <h1>🚆 振替ナビ <span class="badge">PROTOTYPE v2</span></h1>
+      <p>「待つ？振替？」を最初に判断、最適ルートを案内</p>
+    </div>
+
+    <div class="wrap">
+      <!-- 現在地 -->
+      <div class="card">
+        <div class="label">現在地（GPS自動検出）</div>
+        <div class="loc">
+          <div class="pin">📍</div>
+          <div>
+            <div class="now" id="locName">新宿駅</div>
+            <div class="sub" id="locSub">JR・小田急・京王・東京メトロ</div>
+          </div>
+          <select id="locSel" onchange="setLoc()">
+            <option value="shinjuku">新宿駅</option>
+            <option value="ochanomizu">御茶ノ水駅</option>
+            <option value="nakano">中野駅</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- アラート（公式サイト自動取得） -->
+      <div class="alert">
+        <div class="ic">⚠️</div>
+        <div>
+          <h2 id="alertTitle">JR中央線快速 運転見合わせ</h2>
+          <p id="alertBody">人身事故のため運転を見合わせています。</p>
+          <div class="source"><span class="live"></span><span id="alertSource">JR東日本 公式運行情報サイトから自動取得 ・ 7:41 更新</span></div>
+        </div>
+      </div>
+
+      <!-- ★判断カード（主役）★ -->
+      <div id="verdict"></div>
+
+      <!-- 並べ替え -->
+      <div class="seg">
+        <button class="on" data-sort="fast" onclick="sort('fast')">最速順</button>
+        <button data-sort="free" onclick="sort('free')">振替（無料）</button>
+        <button data-sort="easy" onclick="sort('easy')">乗換少</button>
+      </div>
+
+      <div class="seclabel">🔁 振替・代替ルート</div>
+      <div id="routes"></div>
+    </div>
+  </div>
+
+  <div class="tabbar">
+    <div class="t on" data-tab="rider" onclick="tab('rider')"><div class="ico">🧭</div>案内</div>
+    <div class="t" data-tab="map" onclick="tab('map')"><div class="ico">🗺️</div>マップ</div>
+    <div class="t" data-tab="info" onclick="tab('info')"><div class="ico">ℹ️</div>運行情報</div>
+    <div class="t" data-tab="set" onclick="tab('set')"><div class="ico">⚙️</div>設定</div>
+  </div>
+</div>
+
+<script>
+const LINECOLOR={JR:'#00833e',京王:'#dd0077',メトロ丸ノ内:'#f62e36',メトロ東西:'#009bbf',都営:'#0b8043',都営バス:'#1aa84f',タクシー:'#444',徒歩:'#6b7280'};
+
+// recover = 復旧見込みまでの残り分, normalRide = 復旧後の通常乗車分
+const DATA={
+  shinjuku:{
+    name:'新宿駅', sub:'JR・小田急・京王・東京メトロ', dest:'東京方面',
+    title:'JR中央線快速 運転見合わせ', body:'人身事故のため、東京〜三鷹間で上下線とも運転を見合わせています。振替輸送を実施中です。',
+    source:'JR東日本 公式運行情報サイトから自動取得 ・ 7:41 更新',
+    recover:48, normalRide:14,
+    routes:[
+      {mode:'🚇',color:'#f62e36',ti:'丸ノ内線で東京へ',meta:'直通',min:24,cost:'振替（無料）',free:true,transfers:1,official:true,
+        steps:[['メトロ丸ノ内','新宿 → 東京（直通）']]},
+      {mode:'🚆',color:'#dd0077',ti:'京王線＋都営線 経由',meta:'',min:31,cost:'振替（無料）',free:true,transfers:2,official:true,
+        steps:[['京王','新宿 → 笹塚'],['都営','笹塚 → 大手町']]},
+      {mode:'🚌',color:'#1aa84f',ti:'都営バス 代替',meta:'臨時増便',min:38,cost:'¥210',free:false,transfers:0,official:false,
+        steps:[['都営バス','新宿駅西口 → 東京駅丸の内']]},
+      {mode:'🚕',color:'#444',ti:'タクシー相乗り',meta:'同方向マッチング',min:22,cost:'¥約900（割勘）',free:false,transfers:0,official:false,
+        steps:[['タクシー','新宿 → 東京（相乗り3名）']]},
+    ]
+  },
+  ochanomizu:{
+    name:'御茶ノ水駅', sub:'JR中央・総武線・東京メトロ', dest:'東京方面',
+    title:'JR中央・総武線 運転見合わせ', body:'人身事故のため、御茶ノ水〜東京方面で運転を見合わせています。まもなく運転再開の見込みです。',
+    source:'JR東日本 公式運行情報サイトから自動取得 ・ 7:40 更新',
+    recover:7, normalRide:6,
+    routes:[
+      {mode:'🚇',color:'#f62e36',ti:'丸ノ内線で東京へ',meta:'最速',min:9,cost:'振替（無料）',free:true,transfers:0,official:true,
+        steps:[['メトロ丸ノ内','御茶ノ水 → 東京']]},
+      {mode:'🚶',color:'#6b7280',ti:'徒歩＋メトロ',meta:'近距離向け',min:18,cost:'¥180',free:false,transfers:0,official:false,
+        steps:[['徒歩','御茶ノ水 → 淡路町（7分）'],['メトロ丸ノ内','淡路町 → 東京']]},
+    ]
+  },
+  nakano:{
+    name:'中野駅', sub:'JR中央線・東京メトロ東西線', dest:'大手町方面',
+    title:'JR中央線快速 運転見合わせ', body:'人身事故のため、東京〜三鷹間で運転を見合わせています。東西線は通常運行です。',
+    source:'JR東日本 公式運行情報サイトから自動取得 ・ 7:39 更新',
+    recover:50, normalRide:20,
+    routes:[
+      {mode:'🚇',color:'#009bbf',ti:'東西線で大手町へ',meta:'通常運行・直通',min:23,cost:'¥280',free:false,transfers:0,official:false,
+        steps:[['メトロ東西','中野 → 大手町（直通）']]},
+      {mode:'🚆',color:'#dd0077',ti:'バス＋京王線 経由',meta:'',min:41,cost:'振替（無料）',free:true,transfers:2,official:true,
+        steps:[['都営バス','中野 → 新宿'],['京王','新宿 → 都心']]},
+      {mode:'🚕',color:'#444',ti:'タクシー相乗り',meta:'同方向マッチング',min:27,cost:'¥約1,200（割勘）',free:false,transfers:0,official:false,
+        steps:[['タクシー','中野 → 大手町（相乗り）']]},
+    ]
+  }
+};
+
+let cur='shinjuku', curSort='fast';
+
+function setLoc(){ cur=document.getElementById('locSel').value; render(); }
+function sort(s){ curSort=s; document.querySelectorAll('.seg button').forEach(b=>b.classList.toggle('on',b.dataset.sort===s)); render(); }
+
+function fastest(d){ return d.routes.reduce((m,r)=>r.min<m.min?r:m, d.routes[0]); }
+
+function renderVerdict(d){
+  const f=fastest(d);
+  const waitTotal=d.recover+d.normalRide;   // 待って復旧後に行く総所要
+  const diff=waitTotal-f.min;               // プラスなら振替が早い
+  let cls,label,main,sub;
+  if(diff>=12){
+    cls='go'; label='おすすめの判断';
+    main='🔁 振替輸送で移動しましょう';
+    sub=`待つより約${diff}分早く着けます。下のルートからお選びください。`;
+  }else if(diff<=4 && diff>=-4){
+    cls='close'; label='どちらでもOK';
+    main='⏱ 待つ・振替どちらでも大差なし';
+    sub=`差は約${Math.abs(diff)}分。急ぎなら振替、座って行きたいなら再開待ちが快適です。`;
+  }else if(diff>4){
+    cls='go'; label='おすすめの判断';
+    main='🔁 振替がやや早い';
+    sub=`振替の方が約${diff}分早く着けます。`;
+  }else{
+    cls='wait'; label='おすすめの判断';
+    main='⏳ 再開を待つ方が早い';
+    sub=`まもなく再開見込み。振替より約${-diff}分早く着けます。`;
+  }
+  document.getElementById('verdict').className='verdict '+cls;
+  document.getElementById('verdict').innerHTML=`
+    <div class="vlabel">${label}</div>
+    <div class="vmain">${main}</div>
+    <div class="vsub">${sub}</div>
+    <div class="vcompare">
+      <div class="vcell ${diff>0?'':'dim'}">
+        <div class="ct">⏳ 待って再開を待つ</div>
+        <div class="cv">${waitTotal}<span> 分</span></div>
+        <div class="cd">復旧見込み約${d.recover}分＋乗車${d.normalRide}分</div>
+      </div>
+      <div class="vcell ${diff>0?'':'dim'}">
+        <div class="ct">🔁 振替・代替で行く</div>
+        <div class="cv">${f.min}<span> 分</span></div>
+        <div class="cd">最速：${f.ti}</div>
+      </div>
+    </div>`;
+}
+
+function render(){
+  const d=DATA[cur];
+  document.getElementById('locName').textContent=d.name;
+  document.getElementById('locSub').textContent=d.sub;
+  document.getElementById('alertTitle').textContent=d.title;
+  document.getElementById('alertBody').textContent=d.body;
+  document.getElementById('alertSource').textContent=d.source;
+
+  renderVerdict(d);
+
+  let r=[...d.routes];
+  if(curSort==='fast') r.sort((a,b)=>a.min-b.min);
+  if(curSort==='free') r.sort((a,b)=>(b.free-a.free)||a.min-b.min);
+  if(curSort==='easy') r.sort((a,b)=>a.transfers-b.transfers||a.min-b.min);
+  const fast=fastest(d);
+
+  document.getElementById('routes').innerHTML=r.map(o=>`
+    <div class="opt">
+      <div class="top">
+        <div class="mode" style="background:${o.color}">${o.mode}</div>
+        <div>
+          <div class="ti">${o.ti}</div>
+          <div class="meta">${o.meta?o.meta+' ・ ':''}乗換${o.transfers}回</div>
+        </div>
+        <div class="right">
+          <div class="min">${o.min}<span>分</span></div>
+          <div class="cost ${o.free?'free':''}">${o.cost}</div>
+        </div>
+      </div>
+      <div class="steps">
+        ${o.steps.map(s=>`<div class="step"><span class="ln" style="background:${LINECOLOR[s[0]]||'#777'}">${s[0]}</span>${s[1]}</div>`).join('')}
+      </div>
+      <div class="badges">
+        ${o===fast?'<span class="tag reco">★ 最速</span>':''}
+        ${o.free?'<span class="tag free">振替無料</span>':''}
+        ${o.official?'<span class="tag official">✓ 公式サイトで実施確認</span>':''}
+      </div>
+    </div>`).join('')
+    + `<button class="gobtn" onclick="alert('案内を開始します（デモ）')">▶ このルートで案内開始</button>`;
+}
+
+function tab(t){
+  document.querySelectorAll('.tabbar .t').forEach(x=>x.classList.toggle('on',x.dataset.tab===t));
+  if(t!=='rider'){
+    const msg={map:'マップ表示（プロトタイプでは省略）',info:'全路線の運行情報一覧（プロトタイプでは省略）',set:'設定：通知する利用路線の登録など（省略）'};
+    alert(msg[t]);
+    document.querySelector('.tabbar .t[data-tab="rider"]').classList.add('on');
+    document.querySelector('.tabbar .t[data-tab="'+t+'"]').classList.remove('on');
+  }
+}
+
+function tick(){const n=new Date();document.getElementById('clock').textContent=n.getHours()+':'+String(n.getMinutes()).padStart(2,'0');}
+tick();setInterval(tick,30000);
+render();
+</script>
+</body>
+</html>
