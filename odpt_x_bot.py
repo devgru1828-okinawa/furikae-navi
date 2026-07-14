@@ -1,222 +1,258 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-振替ナビ X-bot (MVP)
-ODPT（公共交通オープンデータセンター）で運転見合わせを検知し、
-無料枠の範囲で X に自動投稿する最小構成のスクリプト。
+振替ナビ Bot
+ODPT APIで運転見合わせを検知 → Xに投稿する
 
-方針:
-  - 検知元は Yahoo! ではなく ODPT（正規・無料）。
-  - 振替の実施可否は断定せず、所要時間は「一般的な目安」、
-    振替輸送は各社公式サイトへ誘導する免責表記を必ず付ける。
-  - 同じ内容の重複投稿を避けるため state.json で既投稿を記録
-    （X 無料枠：1日50投稿・書き込みのみ を守るため）。
-
-必要な環境変数（.env または GitHub Secrets）:
-  ODPT_TOKEN              ODPT の consumerKey
-  X_API_KEY              X(API) consumer key
-  X_API_SECRET          X(API) consumer secret
-  X_ACCESS_TOKEN        X access token
-  X_ACCESS_SECRET       X access token secret
-  PWA_BASE_URL          現在地入力・経路案内ページ(PWA)のURL
+GitHub Actionsで5分ごとに実行される。
 """
 
-import os
-import json
-import time
 import hashlib
+import json
+import logging
+import os
+import sys
+from datetime import datetime, timezone
+
 import requests
+import tweepy
 
-# tweepy は投稿時のみ必要（DRY_RUN では未使用でも動く）
-try:
-    import tweepy
-except ImportError:
-    tweepy = None
+# ─── ログ設定 ─────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stdout,
+)
+log = logging.getLogger(__name__)
 
-ODPT_ENDPOINT = "https://api.odpt.org/api/v4/odpt:TrainInformation"
-STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+# ─── 環境変数 ─────────────────────────────────────────────
+ODPT_TOKEN      = os.environ["ODPT_TOKEN"]
+X_API_KEY       = os.environ["X_API_KEY"]
+X_API_SECRET    = os.environ["X_API_SECRET"]
+X_ACCESS_TOKEN  = os.environ["X_ACCESS_TOKEN"]
+X_ACCESS_SECRET = os.environ["X_ACCESS_SECRET"]
+PWA_BASE_URL    = os.environ.get("PWA_BASE_URL", "").rstrip("/")
+DRY_RUN         = os.environ.get("DRY_RUN", "false").lower() == "true"
 
-# 監視する事業者（必要に応じて追加）。ODPT の Operator ID。
-OPERATORS = [
-    "odpt.Operator:JR-East",
-    "odpt.Operator:TokyoMetro",
-    "odpt.Operator:Toei",
-]
+# ─── 定数 ─────────────────────────────────────────────────
+ODPT_BASE   = "https://api.odpt.org/api/4/odpt:TrainInformation"
+STATE_FILE  = "state.json"
+MAX_POSTS_PER_DAY = 45       # X無料枠50件に対して安全マージン
+MAX_STATE_ENTRIES = 500      # state.jsonの上限エントリ数
 
-# 投稿トリガーにするキーワード（事故起因の見合わせに限定したい場合）
+# 対象キーワード（運転見合わせのみ）
 TRIGGER_KEYWORDS = ["運転見合わせ", "見合わせ", "運転を見合わせ"]
 
-# 路線IDの簡易日本語名マップ（無い場合はIDから推定表示）
-RAILWAY_JA = {
-    "odpt.Railway:JR-East.ChuoRapid": "JR中央線快速",
-    "odpt.Railway:JR-East.ChuoSobuLocal": "JR中央・総武線各駅停車",
-    "odpt.Railway:JR-East.Yamanote": "JR山手線",
-    "odpt.Railway:JR-East.KeihinTohokuNegishi": "JR京浜東北・根岸線",
-    "odpt.Railway:JR-East.SaikyoKawagoe": "JR埼京・川越線",
-    "odpt.Railway:TokyoMetro.Marunouchi": "東京メトロ丸ノ内線",
-    "odpt.Railway:TokyoMetro.Tozai": "東京メトロ東西線",
-    "odpt.Railway:TokyoMetro.Hibiya": "東京メトロ日比谷線",
-    "odpt.Railway:Toei.Shinjuku": "都営新宿線",
-    "odpt.Railway:Toei.Oedo": "都営大江戸線",
+# 路線名マッピング（odpt:Railway → 表示名）
+RAILWAY_NAMES: dict[str, str] = {
+    "odpt.Railway:JR-East.ChuoRapid":       "JR中央線快速",
+    "odpt.Railway:JR-East.ChuoSobuLocal":   "JR中央・総武線各駅停車",
+    "odpt.Railway:JR-East.Yamanote":        "JR山手線",
+    "odpt.Railway:JR-East.Keihin-Tohoku":   "JR京浜東北線",
+    "odpt.Railway:JR-East.Joban":           "JR常磐線",
+    "odpt.Railway:JR-East.Sobu":            "JR総武線快速",
+    "odpt.Railway:TokyoMetro.Ginza":        "東京メトロ銀座線",
+    "odpt.Railway:TokyoMetro.Marunouchi":   "東京メトロ丸ノ内線",
+    "odpt.Railway:TokyoMetro.Hibiya":       "東京メトロ日比谷線",
+    "odpt.Railway:TokyoMetro.Tozai":        "東京メトロ東西線",
+    "odpt.Railway:TokyoMetro.Chiyoda":      "東京メトロ千代田線",
+    "odpt.Railway:TokyoMetro.Yurakucho":    "東京メトロ有楽町線",
+    "odpt.Railway:TokyoMetro.Hanzomon":     "東京メトロ半蔵門線",
+    "odpt.Railway:TokyoMetro.Namboku":      "東京メトロ南北線",
+    "odpt.Railway:TokyoMetro.Fukutoshin":   "東京メトロ副都心線",
+    "odpt.Railway:Toei.Asakusa":            "都営浅草線",
+    "odpt.Railway:Toei.Mita":              "都営三田線",
+    "odpt.Railway:Toei.Shinjuku":          "都営新宿線",
+    "odpt.Railway:Toei.Oedo":              "都営大江戸線",
+    "odpt.Railway:Keio.Keio":              "京王線",
+    "odpt.Railway:Odakyu.Odawara":         "小田急小田原線",
+    "odpt.Railway:Tokyu.Toyoko":           "東急東横線",
+    "odpt.Railway:Tokyu.DenToshi":         "東急田園都市線",
+    "odpt.Railway:Seibu.Ikebukuro":        "西武池袋線",
+    "odpt.Railway:Seibu.Shinjuku":         "西武新宿線",
+    "odpt.Railway:Tobu.Skytree":           "東武スカイツリーライン",
+    "odpt.Railway:Tobu.Tojo":             "東武東上線",
 }
 
-# 各社公式 運行情報ページ（免責リンク用）
-OFFICIAL_URL = {
-    "odpt.Operator:JR-East": "https://traininfo.jreast.co.jp/train_info/",
-    "odpt.Operator:TokyoMetro": "https://www.tokyometro.jp/unkou/",
-    "odpt.Operator:Toei": "https://www.kotsu.metro.tokyo.jp/subway/schedule/",
+# 運行会社 → 公式サイトURL
+OPERATOR_URLS: dict[str, str] = {
+    "odpt.Operator:JR-East":      "https://traininfo.jreast.co.jp/train_info/",
+    "odpt.Operator:TokyoMetro":   "https://www.tokyometro.jp/unkou/",
+    "odpt.Operator:Toei":         "https://www.kotsu.metro.tokyo.jp/tetsudo/",
+    "odpt.Operator:Keio":         "https://www.keio.co.jp/train/transfer/",
+    "odpt.Operator:Odakyu":       "https://www.odakyu.jp/train/",
+    "odpt.Operator:Tokyu":        "https://www.tokyu.co.jp/railway/train_info/",
+    "odpt.Operator:Seibu":        "https://www.seiburailway.jp/railways/operation/",
+    "odpt.Operator:Tobu":         "https://www.tobu.co.jp/train/",
 }
 
-DISCLAIMER = "※所要時間は一般的な目安です。振替輸送は各鉄道会社の公式サイトをご確認ください。"
-
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+DISCLAIMER = "※所要時間は目安です。振替輸送の詳細は各鉄道会社の公式サイトをご確認ください。"
 
 
-def jp(field):
-    """ODPTの多言語フィールド({'ja': '...'}) から日本語を取り出す。"""
-    if isinstance(field, dict):
-        return field.get("ja") or field.get("en") or ""
-    return field or ""
+# ─── 状態管理 ──────────────────────────────────────────────
 
-
-def railway_name(railway_id):
-    if railway_id in RAILWAY_JA:
-        return RAILWAY_JA[railway_id]
-    # 例: odpt.Railway:JR-East.ChuoRapid -> ChuoRapid
-    tail = railway_id.split(".")[-1] if railway_id else "路線"
-    return tail
-
-
-def load_state():
+def load_state() -> dict:
+    """state.jsonを読み込む。なければ初期値を返す。"""
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
+            with open(STATE_FILE, encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            return {}
-    return {}
+        except (json.JSONDecodeError, IOError) as e:
+            log.warning("state.json読み込みエラー、初期化します: %s", e)
+    return {"posted": [], "daily_count": 0, "last_date": ""}
 
 
-def save_state(state):
+def save_state(state: dict) -> None:
+    """state.jsonを保存する。エントリ数上限を超えたら古いものを削除。"""
+    # 古いエントリを削除
+    if len(state["posted"]) > MAX_STATE_ENTRIES:
+        state["posted"] = state["posted"][-MAX_STATE_ENTRIES:]
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def fetch_train_info(token):
-    """ODPTから運行情報を取得して結合リストで返す。"""
-    results = []
-    for op in OPERATORS:
-        try:
-            r = requests.get(
-                ODPT_ENDPOINT,
-                params={"odpt:operator": op, "acl:consumerKey": token},
-                timeout=20,
-            )
-            r.raise_for_status()
-            results.extend(r.json())
-        except Exception as e:
-            print(f"[WARN] {op} の取得に失敗: {e}")
-    return results
+def get_today_jst() -> str:
+    """今日の日付（JST）を YYYY-MM-DD で返す。"""
+    jst = timezone.utc
+    # GitHub Actions はUTC。JST = UTC+9
+    from datetime import timedelta
+    now_jst = datetime.now(timezone.utc) + timedelta(hours=9)
+    return now_jst.strftime("%Y-%m-%d")
 
 
-def is_disruption(item):
-    """運転見合わせ等のトリガーに該当するか判定。"""
-    status = jp(item.get("odpt:trainInformationStatus"))
-    text = jp(item.get("odpt:trainInformationText"))
-    blob = f"{status} {text}"
-    return any(k in blob for k in TRIGGER_KEYWORDS)
+def make_event_id(railway_id: str, description: str) -> str:
+    """重複検知用のMD5ハッシュを生成する。"""
+    raw = f"{railway_id}:{description}"
+    return hashlib.md5(raw.encode()).hexdigest()
 
 
-def build_post(item):
-    railway_id = item.get("odpt:railway", "")
-    operator = item.get("odpt:operator", "")
-    name = railway_name(railway_id)
-    text = jp(item.get("odpt:trainInformationText")).strip()
-    official = OFFICIAL_URL.get(operator, "")
-    pwa = os.getenv("PWA_BASE_URL", "https://example.com")
+# ─── ODPT API ─────────────────────────────────────────────
 
-    # 本文（要点のみ。長すぎる公式文は切り詰める）
-    reason = text[:60] + ("…" if len(text) > 60 else "")
+def fetch_disruptions() -> list[dict]:
+    """ODPTから全路線の運行情報を取得し、運転見合わせのみ返す。"""
+    params = {
+        "acl:consumerKey": ODPT_TOKEN,
+    }
+    try:
+        resp = requests.get(ODPT_BASE, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as e:
+        log.error("ODPT API取得エラー: %s", e)
+        return []
+
+    disruptions = []
+    for item in data:
+        desc = item.get("odpt:trainInformationText", {})
+        # 多言語対応：ja を優先、なければ en
+        text = desc.get("ja") or desc.get("en", "")
+        if not text:
+            continue
+        # トリガーキーワードチェック
+        if not any(kw in text for kw in TRIGGER_KEYWORDS):
+            continue
+        disruptions.append({
+            "railway":  item.get("odpt:railway", ""),
+            "operator": item.get("odpt:operator", ""),
+            "text":     text,
+        })
+
+    log.info("ODPT取得: 全%d件中、運転見合わせ%d件", len(data), len(disruptions))
+    return disruptions
+
+
+# ─── ポスト生成 ────────────────────────────────────────────
+
+def build_post(railway_id: str, operator_id: str, text: str) -> str:
+    """投稿テキストを生成する。X の280文字制限を考慮。"""
+    railway_name = RAILWAY_NAMES.get(railway_id, railway_id.split(":")[-1])
+    official_url = OPERATOR_URLS.get(operator_id, "")
 
     lines = [
-        f"🚨 {name} 運転見合わせ",
-        reason,
-        f"▶ 振替・代替ルートを確認: {pwa}",
+        f"【運転見合わせ情報】",
+        f"🚃 {railway_name}",
+        f"",
+        text[:80] + ("…" if len(text) > 80 else ""),
+        f"",
         DISCLAIMER,
     ]
-    if official:
-        lines.append(f"公式運行情報: {official}")
-    lines.append("#運行情報 #振替ナビ")
 
-    post = "\n".join([l for l in lines if l])
-    # X の上限(280字, 日本語は全角=1)に収める保険
-    return post[:270]
+    if official_url:
+        lines.append(f"🔗 公式: {official_url}")
 
+    if PWA_BASE_URL:
+        lines.append(f"📱 振替ナビ: {PWA_BASE_URL}")
 
-def dedup_key(item):
-    """路線×内容で一意キー。内容が変われば再投稿対象になる。"""
-    raw = item.get("odpt:railway", "") + "|" + jp(item.get("odpt:trainInformationText"))
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+    return "\n".join(lines)
 
 
-def get_x_client():
-    if tweepy is None:
-        raise RuntimeError("tweepy 未インストール。`pip install tweepy` を実行してください。")
-    return tweepy.Client(
-        consumer_key=os.environ["X_API_KEY"],
-        consumer_secret=os.environ["X_API_SECRET"],
-        access_token=os.environ["X_ACCESS_TOKEN"],
-        access_token_secret=os.environ["X_ACCESS_SECRET"],
-    )
+# ─── X 投稿 ───────────────────────────────────────────────
+
+def post_to_x(text: str) -> bool:
+    """Xに投稿する。成功したらTrue。"""
+    if DRY_RUN:
+        log.info("[DRY RUN] 投稿をスキップ:\n%s", text)
+        return True
+
+    try:
+        client = tweepy.Client(
+            consumer_key=X_API_KEY,
+            consumer_secret=X_API_SECRET,
+            access_token=X_ACCESS_TOKEN,
+            access_token_secret=X_ACCESS_SECRET,
+        )
+        client.create_tweet(text=text)
+        log.info("投稿成功")
+        return True
+    except tweepy.TweepyException as e:
+        log.error("X投稿エラー: %s", e)
+        return False
 
 
-def main():
-    token = os.environ.get("ODPT_TOKEN")
-    if not token:
-        raise SystemExit("環境変数 ODPT_TOKEN が未設定です。")
+# ─── メイン ───────────────────────────────────────────────
 
+def main() -> None:
     state = load_state()
-    posted_keys = set(state.get("posted", []))
-    daily_count = state.get("daily_count", 0)
-    DAILY_LIMIT = 45  # 無料枠50/日に対して安全マージン
+    today = get_today_jst()
 
-    items = fetch_train_info(token)
-    disruptions = [i for i in items if is_disruption(i)]
-    print(f"取得 {len(items)} 件 / 見合わせ {len(disruptions)} 件")
+    # 日付が変わったら投稿カウントをリセット
+    if state.get("last_date") != today:
+        log.info("新しい日付 %s: 投稿カウントをリセット", today)
+        state["daily_count"] = 0
+        state["last_date"] = today
 
-    client = None
+    # 1日の上限チェック
+    if state["daily_count"] >= MAX_POSTS_PER_DAY:
+        log.warning("本日の投稿上限(%d)に達しています。スキップ。", MAX_POSTS_PER_DAY)
+        return
+
+    disruptions = fetch_disruptions()
+    if not disruptions:
+        log.info("運転見合わせなし。終了。")
+        return
+
+    posted_ids: set[str] = set(state.get("posted", []))
     new_posts = 0
 
-    for item in disruptions:
-        key = dedup_key(item)
-        if key in posted_keys:
-            continue  # 同内容は投稿済み
-        if daily_count + new_posts >= DAILY_LIMIT:
-            print("[INFO] 1日の投稿上限に達したため停止。")
+    for d in disruptions:
+        if state["daily_count"] + new_posts >= MAX_POSTS_PER_DAY:
+            log.warning("上限に達したため残りをスキップ")
             break
 
-        post = build_post(item)
-        if DRY_RUN:
-            print("----- DRY_RUN（投稿せず表示）-----")
-            print(post)
-        else:
-            if client is None:
-                client = get_x_client()
-            try:
-                client.create_tweet(text=post)
-                print(f"[OK] 投稿: {railway_name(item.get('odpt:railway',''))}")
-            except Exception as e:
-                print(f"[ERROR] 投稿失敗: {e}")
-                continue
+        event_id = make_event_id(d["railway"], d["text"])
+        if event_id in posted_ids:
+            log.info("重複スキップ: %s", d["railway"])
+            continue
 
-        posted_keys.add(key)
-        new_posts += 1
-        time.sleep(2)  # レート配慮
+        post_text = build_post(d["railway"], d["operator"], d["text"])
+        log.info("投稿:\n%s", post_text)
 
-    state["posted"] = list(posted_keys)[-500:]  # 肥大化防止
-    state["daily_count"] = daily_count + new_posts
+        if post_to_x(post_text):
+            posted_ids.add(event_id)
+            state["posted"].append(event_id)
+            new_posts += 1
+
+    state["daily_count"] = state.get("daily_count", 0) + new_posts
     save_state(state)
-    print(f"完了: 新規投稿 {new_posts} 件")
+    log.info("完了: 今回%d件投稿 / 本日累計%d件", new_posts, state["daily_count"])
 
 
 if __name__ == "__main__":
